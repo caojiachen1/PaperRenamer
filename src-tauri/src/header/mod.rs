@@ -22,6 +22,8 @@ pub struct TitleResult {
     pub title: Option<String>,
     pub pages: usize,
     pub tokens: usize,
+    /// Raw text layer of page 1, reused for DOI detection.
+    pub first_page_text: String,
 }
 
 impl HeaderEngine {
@@ -58,22 +60,9 @@ impl HeaderEngine {
         Ok(HeaderEngine { crf, lex, pdfium })
     }
 
-    /// First-page DOI candidate (`10.xxxx/...`) from the raw text layer.
-    pub fn doi_from_text(&self, pdf: &Path) -> Option<String> {
-        let doc = self.pdfium.load_pdf_from_file(pdf, None).ok()?;
-        let page = doc.pages().get(0).ok()?;
-        let text = page.text().ok()?;
-        let raw = text.all();
-        let re = regex::Regex::new(r#"(?i)10\.\d{4,9}/[^\s"'<>]+"#).ok()?;
-        re.find(&raw).map(|m| {
-            m.as_str()
-                .trim_end_matches(['.', ',', ')', ']', ';'])
-                .to_string()
-        })
-    }
-
     pub fn title_from_pdf(&self, pdf: &Path) -> Result<TitleResult, String> {
-        let blocks = trim_to_header(extract::extract_page(&self.pdfium, pdf, 0)?);
+        let (blocks, first_page_text) = extract::extract_page_with_raw(&self.pdfium, pdf, 0)?;
+        let blocks = trim_to_header(blocks);
         let (cols, metas) = features::build(&blocks, &self.lex);
         let labels = self.crf.label(&cols);
         let title = assemble_title(&self.crf, &labels, &metas);
@@ -82,6 +71,7 @@ impl HeaderEngine {
             title,
             pages: 1,
             tokens: metas.len(),
+            first_page_text,
         })
     }
 

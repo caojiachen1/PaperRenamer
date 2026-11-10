@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { CopyOutcome, ParseOutcome, Row } from "./types";
+import type { CopyOutcome, LocalParse, Row, VerifyOutcome } from "./types";
 
 const COPY_LABELS: Record<CopyOutcome["status"], string> = {
   Created: "已生成",
@@ -13,17 +13,39 @@ const COPY_LABELS: Record<CopyOutcome["status"], string> = {
 
 let nextId = 1;
 
+function applyVerify(row: Row, out: VerifyOutcome): Row {
+  if (row.edited) {
+    return { ...row, verified: true, verifying: false };
+  }
+  return {
+    ...row,
+    verified: true,
+    verifying: false,
+    title: out.title,
+    editTitle: out.title,
+    source: out.source,
+    doi: out.doi,
+    suggestedName: out.suggested_name,
+    warnings: out.warning ? [...row.warnings, out.warning] : row.warnings,
+  };
+}
+
 export default function App() {
   const [rows, setRows] = useState<Row[]>([]);
-  const [crossref, setCrossref] = useState(
-    () => localStorage.getItem("crossref") !== "off"
-  );
+  const [crossref, setCrossref] = useState(false);
   const [engine, setEngine] = useState<"loading" | "ready" | "error">("loading");
   const [engineError, setEngineError] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copyingAll, setCopyingAll] = useState(false);
   const [tick, setTick] = useState(0);
+  const [verifyTick, setVerifyTick] = useState(0);
   const processingRef = useRef(false);
+  const rowsRef = useRef<Row[]>([]);
+  const verifyingIds = useRef(new Set<number>());
+
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
 
   useEffect(() => {
     invoke<string>("init_engine")
@@ -35,8 +57,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("crossref", crossref ? "on" : "off");
-  }, [crossref]);
+    let alive = true;
+    invoke<{ crossref: boolean }>("get_settings")
+      .then((s) => {
+        if (alive) setCrossref(Boolean(s.crossref));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const setCrossrefEnabled = (enabled: boolean) => {
+    setCrossref(enabled);
+    void invoke("set_crossref", { crossref: enabled }).catch(() => {});
+  };
 
   const addPaths = useCallback(async (paths: string[]) => {
     const collected: string[] = [];
@@ -96,7 +131,7 @@ export default function App() {
     setRows((rs) =>
       rs.map((r) => (r.id === next.id ? { ...r, status: "parsing" } : r))
     );
-    invoke<ParseOutcome>("parse_pdf", { path: next.path, crossref })
+    invoke<LocalParse>("parse_local", { path: next.path })
       .then((out) => {
         setRows((rs) =>
           rs.map((r) =>
@@ -110,6 +145,9 @@ export default function App() {
                   doi: out.doi,
                   suggestedName: out.suggested_name,
                   warnings: out.warnings,
+                  cjk: out.cjk,
+                  ext: out.ext,
+                  verified: false,
                   error: undefined,
                 }
               : r
@@ -129,7 +167,50 @@ export default function App() {
         processingRef.current = false;
         setTick((t) => t + 1);
       });
-  }, [rows, crossref, tick]);
+  }, [rows, tick]);
+
+  // Online verification runs while the user can already review/edit titles.
+  useEffect(() => {
+    if (!crossref) return;
+    const limit = 4;
+    while (verifyingIds.current.size < limit) {
+      const next = rows.find(
+        (r) =>
+          (r.status === "ready" || r.status === "copied") &&
+          !r.verified &&
+          !r.edited &&
+          !r.cjk &&
+          !verifyingIds.current.has(r.id)
+      );
+      if (!next) return;
+      verifyingIds.current.add(next.id);
+      patchRow(next.id, { verifying: true });
+      invoke<VerifyOutcome>("verify_crossref", {
+        title: next.title ?? next.editTitle,
+        doi: next.doi ?? null,
+        source: next.source ?? "",
+        suggested_name: next.suggestedName ?? "",
+        cjk: next.cjk ?? false,
+        ext: next.ext ?? "pdf",
+      })
+        .then((out) => {
+          setRows((rs) =>
+            rs.map((r) => (r.id === next.id ? applyVerify(r, out) : r))
+          );
+        })
+        .catch(() => {
+          setRows((rs) =>
+            rs.map((r) =>
+              r.id === next.id ? { ...r, verified: true, verifying: false } : r
+            )
+          );
+        })
+        .finally(() => {
+          verifyingIds.current.delete(next.id);
+          setVerifyTick((t) => t + 1);
+        });
+    }
+  }, [rows, crossref, verifyTick]);
 
   const pickFiles = async () => {
     const picked = await open({
@@ -170,11 +251,20 @@ export default function App() {
   const copyAll = async () => {
     setCopyingAll(true);
     try {
-      // Sequential: rows state is stale inside the loop, so re-read via invoke args only.
-      const targets = rows.filter((r) => r.status === "ready");
-      for (const row of targets) {
-        await copyRow(row);
-      }
+      const queue = rowsRef.current
+        .filter((r) => r.status === "ready")
+        .map((r) => r.id);
+      const worker = async () => {
+        for (;;) {
+          const id = queue.shift();
+          if (id === undefined) return;
+          const row = rowsRef.current.find((r) => r.id === id);
+          if (row && row.status === "ready") await copyRow(row);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(4, queue.length) }, worker)
+      );
     } finally {
       setCopyingAll(false);
     }
@@ -215,7 +305,7 @@ export default function App() {
           <input
             type="checkbox"
             checked={crossref}
-            onChange={(e) => setCrossref(e.target.checked)}
+            onChange={(e) => setCrossrefEnabled(e.target.checked)}
           />
           CrossRef 在线校验
         </label>
@@ -266,7 +356,10 @@ export default function App() {
                       className="title-input"
                       value={row.editTitle}
                       onChange={(e) =>
-                        patchRow(row.id, { editTitle: e.target.value })
+                        patchRow(row.id, {
+                          editTitle: e.target.value,
+                          edited: true,
+                        })
                       }
                       spellCheck={false}
                     />
@@ -283,6 +376,7 @@ export default function App() {
                 </div>
                 <div className="cell-source">
                   {row.source && <span className="badge badge-outline">{row.source}</span>}
+                  {row.verifying && <span className="verify-hint">核对中…</span>}
                 </div>
                 <div className="cell-status">
                   {row.status === "queued" && <span className="badge badge-plain">等待</span>}

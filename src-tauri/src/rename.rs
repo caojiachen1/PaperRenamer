@@ -26,7 +26,8 @@ impl CopyOutcome {
 }
 
 pub fn sanitize_title(title: &str) -> String {
-    let ws = regex::Regex::new(r"\s+").unwrap();
+    static WS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let ws = WS.get_or_init(|| regex::Regex::new(r"\s+").unwrap());
     let collapsed = ws.replace_all(title.trim(), " ");
     let mut sanitized: String = collapsed
         .chars()

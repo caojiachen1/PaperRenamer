@@ -21,11 +21,27 @@ fn client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(6))
             .user_agent(format!("PaperRenamer/0.1 (mailto:{MAILTO})"))
             .build()
             .expect("reqwest client")
     })
+}
+
+/// Consecutive transport failures. Once the network looks dead, skip further
+/// lookups so an offline batch does not pay the connect timeout per file.
+fn network_failures() -> &'static std::sync::atomic::AtomicU32 {
+    static FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    &FAILURES
+}
+
+fn note_transport_error() {
+    network_failures().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn note_reachable() {
+    network_failures().store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn cache() -> &'static Mutex<HashMap<String, Option<CrossRefHit>>> {
@@ -55,10 +71,14 @@ pub fn resolve_doi(doi: &str) -> Option<CrossRefHit> {
     }
 
     let url = format!(
-        "https://api.crossref.org/works/{}?mailto={MAILTO}",
+        "https://api.crossref.org/works/{}",
         utf8_percent_encode(&clean, NON_ALPHANUMERIC)
     );
-    let result = fetch_work(&url);
+    let result = match get_json(&url, &[("mailto", MAILTO)]) {
+        Ok(Some(json)) => Ok(parse_message(&json["message"])),
+        Ok(None) => Ok(None),
+        Err(transient) => Err(transient),
+    };
     let mut guard = cache().lock().unwrap();
     match result {
         Ok(Some(hit)) => {
@@ -88,30 +108,20 @@ pub fn search_by_title(title: &str) -> Option<CrossRefHit> {
         return hit.clone();
     }
 
-    let resp = client()
-        .get("https://api.crossref.org/works")
-        .query(&[
+    let json = match get_json(
+        "https://api.crossref.org/works",
+        &[
             ("query.title", clean),
             ("rows", "1"),
             ("mailto", MAILTO),
-        ])
-        .header("Accept", "application/json")
-        .send();
-
-    let resp = match resp {
-        Ok(r) => r,
-        Err(_) => return None, // network error — keep retryable
-    };
-    let status = resp.status().as_u16();
-    if !resp.status().is_success() {
-        if !is_transient(status) {
+        ],
+    ) {
+        Ok(Some(json)) => json,
+        Ok(None) => {
             cache().lock().unwrap().insert(key, None);
+            return None;
         }
-        return None;
-    }
-    let json: Value = match resp.json() {
-        Ok(v) => v,
-        Err(_) => return None,
+        Err(_) => return None, // network error — keep retryable
     };
     let candidate = &json["message"]["items"][0];
     let candidate_title = candidate["title"][0].as_str().unwrap_or("");
@@ -124,23 +134,49 @@ pub fn search_by_title(title: &str) -> Option<CrossRefHit> {
     hit
 }
 
-/// Ok(Some) = hit, Ok(None) = definitive rejection, Err(transient) = retryable.
-fn fetch_work(url: &str) -> Result<Option<CrossRefHit>, bool> {
-    let resp = client()
-        .get(url)
-        .header("Accept", "application/json")
-        .send()
-        .map_err(|_| true)?;
-    let status = resp.status().as_u16();
-    if !resp.status().is_success() {
-        return if is_transient(status) {
-            Err(true)
-        } else {
-            Ok(None)
-        };
+/// Ok(Some) = JSON body, Ok(None) = definitive rejection, Err = retryable.
+/// Throttling responses (429/5xx) are retried a couple of times; transport
+/// errors are not retried but count towards the offline circuit breaker.
+fn get_json(url: &str, query: &[(&str, &str)]) -> Result<Option<Value>, bool> {
+    use std::sync::atomic::Ordering;
+    const ATTEMPTS: u32 = 3;
+    const TRIP_AFTER: u32 = 3;
+
+    if network_failures().load(Ordering::Relaxed) >= TRIP_AFTER {
+        return Err(true);
     }
-    let json: Value = resp.json().map_err(|_| true)?;
-    Ok(parse_message(&json["message"]))
+    for attempt in 0..ATTEMPTS {
+        let mut req = client().get(url).header("Accept", "application/json");
+        if !query.is_empty() {
+            req = req.query(query);
+        }
+        match req.send() {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if resp.status().is_success() {
+                    return match resp.json::<Value>() {
+                        Ok(v) => {
+                            note_reachable();
+                            Ok(Some(v))
+                        }
+                        Err(_) => Err(true),
+                    };
+                }
+                if !is_transient(status) {
+                    note_reachable();
+                    return Ok(None);
+                }
+            }
+            Err(_) => {
+                note_transport_error();
+                return Err(true);
+            }
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(300 * u64::from(attempt + 1)));
+        }
+    }
+    Err(true)
 }
 
 fn parse_message(msg: &Value) -> Option<CrossRefHit> {
@@ -166,12 +202,14 @@ fn parse_message(msg: &Value) -> Option<CrossRefHit> {
 }
 
 fn strip_markup(text: &str) -> String {
-    let tags = Regex::new(r"<[^>]*>").unwrap();
+    static TAGS: OnceLock<Regex> = OnceLock::new();
+    let tags = TAGS.get_or_init(|| Regex::new(r"<[^>]*>").unwrap());
     tags.replace_all(text, "").replace(['{', '}'], "")
 }
 
 fn collapse_ws(s: &str) -> String {
-    let ws = Regex::new(r"\s+").unwrap();
+    static WS: OnceLock<Regex> = OnceLock::new();
+    let ws = WS.get_or_init(|| Regex::new(r"\s+").unwrap());
     ws.replace_all(s.trim(), " ").trim().to_string()
 }
 
@@ -194,9 +232,11 @@ pub fn word_overlap(a: &str, b: &str) -> f64 {
 
 /// Normalized similarity for cross-source title agreement (xDoc titleSimilarity).
 pub fn title_similarity(a: &str, b: &str) -> f64 {
+    static NON_WORD: OnceLock<Regex> = OnceLock::new();
     let norm = |s: &str| -> String {
         let lower = s.to_lowercase();
-        let stripped = Regex::new(r"[^a-z0-9\s]").unwrap().replace_all(&lower, "");
+        let re = NON_WORD.get_or_init(|| Regex::new(r"[^a-z0-9\s]").unwrap());
+        let stripped = re.replace_all(&lower, "");
         collapse_ws(&stripped)
     };
     let na = norm(a);

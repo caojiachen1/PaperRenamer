@@ -6,6 +6,8 @@ pub mod headless;
 mod pdfmeta;
 mod pipeline;
 mod rename;
+mod settings;
+mod ui;
 mod xmlutil;
 
 pub fn run() {
@@ -14,9 +16,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::init_engine,
-            commands::parse_pdf,
+            commands::parse_local,
+            commands::verify_crossref,
             commands::make_copy,
             commands::scan_folder,
+            commands::get_settings,
+            commands::set_crossref,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

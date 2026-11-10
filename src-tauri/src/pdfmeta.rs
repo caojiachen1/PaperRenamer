@@ -68,14 +68,33 @@ fn decode_pdf_string(raw: &[u8]) -> String {
     }
 }
 
-fn parse_xmp(xmp: &str) -> (Option<String>, Option<String>) {    let li_title = Regex::new(
-        r"<(?:[\w.-]+:)?title[^>]*>\s*<(?:[\w.-]+:)?Alt[^>]*>\s*<(?:[\w.-]+:)?li[^>]*>([\s\S]*?)</(?:[\w.-]+:)?li>",
-    )
-    .unwrap();
-    let plain_title =
-        Regex::new(r"<(?:[\w.-]+:)?title[^>]*>([^<]+)</(?:[\w.-]+:)?title>").unwrap();
-    let doi_re = Regex::new(r"<(?:[\w.-]+:)?doi[^>]*>\s*([^<\s]+)\s*</").unwrap();
-    let dc_id_doi = Regex::new(r#"(?i)doi:\s*(10\.\d{4,9}/[^\s<>"']+)"#).unwrap();
+struct XmpPatterns {
+    li_title: Regex,
+    plain_title: Regex,
+    doi: Regex,
+    dc_id_doi: Regex,
+}
+
+fn xmp_patterns() -> &'static XmpPatterns {
+    static PATTERNS: std::sync::OnceLock<XmpPatterns> = std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| XmpPatterns {
+        li_title: Regex::new(
+            r"<(?:[\w.-]+:)?title[^>]*>\s*<(?:[\w.-]+:)?Alt[^>]*>\s*<(?:[\w.-]+:)?li[^>]*>([\s\S]*?)</(?:[\w.-]+:)?li>",
+        )
+        .unwrap(),
+        plain_title: Regex::new(r"<(?:[\w.-]+:)?title[^>]*>([^<]+)</(?:[\w.-]+:)?title>")
+            .unwrap(),
+        doi: Regex::new(r"<(?:[\w.-]+:)?doi[^>]*>\s*([^<\s]+)\s*</").unwrap(),
+        dc_id_doi: Regex::new(r#"(?i)doi:\s*(10\.\d{4,9}/[^\s<>"']+)"#).unwrap(),
+    })
+}
+
+fn parse_xmp(xmp: &str) -> (Option<String>, Option<String>) {
+    let pats = xmp_patterns();
+    let li_title = &pats.li_title;
+    let plain_title = &pats.plain_title;
+    let doi_re = &pats.doi;
+    let dc_id_doi = &pats.dc_id_doi;
 
     let title = li_title
         .captures(xmp)

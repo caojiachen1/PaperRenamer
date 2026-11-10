@@ -1,9 +1,19 @@
-export interface ParseOutcome {
+export interface LocalParse {
   title: string;
   doi: string | null;
   source: string;
   suggested_name: string;
   warnings: string[];
+  cjk: boolean;
+  ext: string;
+}
+
+export interface VerifyOutcome {
+  title: string;
+  doi: string | null;
+  source: string;
+  suggested_name: string;
+  warning: string | null;
 }
 
 export interface CopyOutcome {
@@ -24,6 +34,11 @@ export interface Row {
   doi?: string | null;
   suggestedName?: string;
   warnings: string[];
+  cjk?: boolean;
+  ext?: string;
+  verified?: boolean;
+  verifying?: boolean;
+  edited?: boolean;
   error?: string;
   newPath?: string;
   copyLabel?: string;

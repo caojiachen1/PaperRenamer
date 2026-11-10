@@ -1,29 +1,39 @@
-//! Title extraction pipeline: embedded XMP/Info → Rust header CRF → CrossRef
-//! cross-validation. No OCR, no external services beyond CrossRef.
+//! Title extraction pipeline, split into two phases so the slow online check
+//! can run concurrently with other files:
+//!   phase 1 (local): embedded XMP/Info → Rust header CRF → title choice
+//!   phase 2 (online): CrossRef cross-validation against the local result
 
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
+use regex::Regex;
 use serde::Serialize;
 
 use crate::{crossref, engine, pdfmeta, rename};
 
+/// Everything that can be decided without network access.
 #[derive(Serialize, Clone, Debug)]
-pub struct ParseOutcome {
+pub struct LocalParse {
     pub title: String,
     pub doi: Option<String>,
     pub source: String,
     pub suggested_name: String,
     pub warnings: Vec<String>,
+    pub cjk: bool,
+    pub ext: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct CachedHeader {
-    title: Option<String>,
-    doi: Option<String>,
+#[derive(Serialize, Clone, Debug)]
+pub struct VerifyOutcome {
+    pub title: String,
+    pub doi: Option<String>,
+    pub source: String,
+    pub suggested_name: String,
+    pub warning: Option<String>,
 }
 
-pub fn parse_pdf(path: &Path, crossref_enabled: bool) -> Result<ParseOutcome, String> {
+pub fn parse_local(path: &Path) -> Result<LocalParse, String> {
     let bytes = fs::read(path).map_err(|e| format!("读取文件失败: {e}"))?;
     let mut warnings = Vec::new();
 
@@ -40,7 +50,7 @@ pub fn parse_pdf(path: &Path, crossref_enabled: bool) -> Result<ParseOutcome, St
     let xmp_title = embedded.title.clone();
     let cjk = has_cjk(grobid_title.as_deref()) || has_cjk(xmp_title.as_deref());
 
-    let (mut title, mut source) = match (grobid_title, xmp_title) {
+    let (title, source) = match (grobid_title, xmp_title) {
         (Some(g), Some(x)) => {
             if cjk {
                 // The CRF is trained on Latin layouts; prefer CJK metadata.
@@ -63,57 +73,114 @@ pub fn parse_pdf(path: &Path, crossref_enabled: bool) -> Result<ParseOutcome, St
         }
     };
 
-    let mut doi = header.and_then(|h| h.doi).or(embedded.doi);
+    let doi = header
+        .as_ref()
+        .and_then(|h| find_doi(&h.first_page_text))
+        .or(embedded.doi);
 
-    if crossref_enabled && !cjk {
-        if let Some(d) = &doi {
-            if let Some(hit) = crossref::resolve_doi(d) {
-                // Guard against a mis-extracted DOI pointing at a different paper.
-                if crossref::word_overlap(&title.to_lowercase(), &hit.title.to_lowercase()) >= 0.25
-                {
-                    title = hit.title;
-                    source = "CrossRef".to_string();
-                } else {
-                    warnings.push("CrossRef 结果与本地标题差异过大，保留本地标题".to_string());
-                }
-            }
-        } else if title.chars().count() > 10 {
-            if let Some(hit) = crossref::search_by_title(&title) {
-                title = hit.title;
-                doi = hit.doi.or(doi);
-                source = "CrossRef".to_string();
-            }
-        }
-    } else if cjk {
+    if cjk {
         warnings.push("检测到中文论文，跳过在线校验（GROBID/CrossRef 对中文支持有限）".to_string());
     }
 
-    let stem = rename::sanitize_title(&title);
-    if stem.is_empty() {
-        return Err("标题清洗后为空，无法生成文件名".to_string());
-    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_else(|| "pdf".to_string());
+    let suggested_name = suggested_name(&title, &ext)?;
 
-    Ok(ParseOutcome {
+    Ok(LocalParse {
         title,
         doi,
         source,
-        suggested_name: format!("{stem}.{ext}"),
+        suggested_name,
         warnings,
+        cjk,
+        ext,
     })
 }
 
-fn header_extract(path: &Path) -> Result<CachedHeader, String> {
+/// CrossRef verification of a local result. Returns the local values unchanged
+/// when the online lookup is inconclusive.
+pub fn verify(local: &LocalParse) -> VerifyOutcome {
+    let mut out = VerifyOutcome {
+        title: local.title.clone(),
+        doi: local.doi.clone(),
+        source: local.source.clone(),
+        suggested_name: local.suggested_name.clone(),
+        warning: None,
+    };
+    if local.cjk {
+        return out;
+    }
+
+    let mut changed = false;
+    if let Some(d) = &local.doi {
+        if let Some(hit) = crossref::resolve_doi(d) {
+            // Guard against a mis-extracted DOI pointing at a different paper.
+            if crossref::word_overlap(&out.title.to_lowercase(), &hit.title.to_lowercase()) >= 0.25
+            {
+                out.title = hit.title;
+                out.source = "CrossRef".to_string();
+                changed = true;
+            } else {
+                out.warning = Some("CrossRef 结果与本地标题差异过大，保留本地标题".to_string());
+            }
+        }
+    } else if out.title.chars().count() > 10 {
+        if let Some(hit) = crossref::search_by_title(&out.title) {
+            out.title = hit.title;
+            out.doi = hit.doi.or(out.doi);
+            out.source = "CrossRef".to_string();
+            changed = true;
+        }
+    }
+
+    if changed {
+        match suggested_name(&out.title, &local.ext) {
+            Ok(name) => out.suggested_name = name,
+            Err(_) => {
+                out.title = local.title.clone();
+                out.source = local.source.clone();
+            }
+        }
+    }
+    out
+}
+
+fn suggested_name(title: &str, ext: &str) -> Result<String, String> {
+    let stem = rename::sanitize_title(title);
+    if stem.is_empty() {
+        return Err("标题清洗后为空，无法生成文件名".to_string());
+    }
+    Ok(format!("{stem}.{ext}"))
+}
+
+fn find_doi(text: &str) -> Option<String> {
+    static DOI_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let re = DOI_RE
+        .get_or_init(|| Regex::new(r#"(?i)10\.\d{4,9}/[^\s"'<>]+"#).ok())
+        .as_ref()?;
+    re.find(text).map(|m| {
+        m.as_str()
+            .trim_end_matches(['.', ',', ')', ']', ';'])
+            .to_string()
+    })
+}
+
+struct HeaderInfo {
+    title: Option<String>,
+    first_page_text: String,
+}
+
+fn header_extract(path: &Path) -> Result<HeaderInfo, String> {
     let engine = engine::engine()?;
-    let title = engine
+    let result = engine
         .title_from_pdf(path)
-        .map_err(|e| format!("页眉识别失败: {e}"))?
-        .title;
-    let doi = engine.doi_from_text(path);
-    Ok(CachedHeader { title, doi })
+        .map_err(|e| format!("页眉识别失败: {e}"))?;
+    Ok(HeaderInfo {
+        title: result.title,
+        first_page_text: result.first_page_text,
+    })
 }
 
 fn has_cjk(s: Option<&str>) -> bool {

@@ -58,6 +58,16 @@ pub fn bind_pdfium(dll: &Path) -> Result<Pdfium, String> {
 }
 
 pub fn extract_page(pdfium: &Pdfium, pdf: &Path, page_index: i32) -> Result<Vec<Block>, String> {
+    Ok(extract_page_with_raw(pdfium, pdf, page_index)?.0)
+}
+
+/// Same as [extract_page], but also returns the raw text stream of the page so
+/// callers can reuse the single document open for DOI detection.
+pub fn extract_page_with_raw(
+    pdfium: &Pdfium,
+    pdf: &Path,
+    page_index: i32,
+) -> Result<(Vec<Block>, String), String> {
     let doc = pdfium
         .load_pdf_from_file(pdf, None)
         .map_err(|e| format!("打开 PDF 失败: {e}"))?;
@@ -66,6 +76,7 @@ pub fn extract_page(pdfium: &Pdfium, pdf: &Path, page_index: i32) -> Result<Vec<
         .get(page_index)
         .map_err(|e| format!("读取页面失败: {e}"))?;
     let text = page.text().map_err(|e| format!("抽取文本层失败: {e}"))?;
+    let raw = text.all();
 
     let mut chars: Vec<Ch> = Vec::with_capacity(text.len() as usize);
     let mut pending_space = true;
@@ -208,7 +219,7 @@ pub fn extract_page(pdfium: &Pdfium, pdf: &Path, page_index: i32) -> Result<Vec<
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Ok(group_blocks(out_lines))
+    Ok((group_blocks(out_lines), raw))
 }
 
 fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
