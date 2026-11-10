@@ -29,12 +29,13 @@ struct Processed {
 pub fn run(args: &[String]) {
     let started = Instant::now();
     let timing = std::env::var_os("PAPERRENAMER_TIMING").is_some();
+    let settings = crate::settings::load();
     let online = if std::env::var_os("PAPERRENAMER_OFFLINE").is_some() {
         false
     } else if std::env::var_os("PAPERRENAMER_ONLINE").is_some() {
         true
     } else {
-        crate::settings::load().crossref
+        settings.crossref
     };
     let (pdfs, problems) = rename::collect_pdfs(args);
 
@@ -125,15 +126,17 @@ pub fn run(args: &[String]) {
         );
     }
 
-    crate::ui::show_summary(crate::ui::Summary {
-        total: pdfs.len(),
-        created,
-        existing,
-        already_named,
-        failed,
-        log_path,
-        problems,
-    });
+    if settings.show_dialog {
+        crate::ui::show_summary(crate::ui::Summary {
+            total: pdfs.len(),
+            created,
+            existing,
+            already_named,
+            failed,
+            log_path,
+            problems,
+        });
+    }
 }
 
 fn process_item(item: &Item, local: &LocalParse, online: bool) -> Processed {

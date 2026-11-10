@@ -33,6 +33,7 @@ function applyVerify(row: Row, out: VerifyOutcome): Row {
 export default function App() {
   const [rows, setRows] = useState<Row[]>([]);
   const [crossref, setCrossref] = useState(false);
+  const [showDialog, setShowDialog] = useState(true);
   const [engine, setEngine] = useState<"loading" | "ready" | "error">("loading");
   const [engineError, setEngineError] = useState("");
   const [dragOver, setDragOver] = useState(false);
@@ -58,9 +59,11 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;
-    invoke<{ crossref: boolean }>("get_settings")
+    invoke<{ crossref: boolean; show_dialog: boolean }>("get_settings")
       .then((s) => {
-        if (alive) setCrossref(Boolean(s.crossref));
+        if (!alive) return;
+        setCrossref(Boolean(s.crossref));
+        setShowDialog(s.show_dialog !== false);
       })
       .catch(() => {});
     return () => {
@@ -70,7 +73,18 @@ export default function App() {
 
   const setCrossrefEnabled = (enabled: boolean) => {
     setCrossref(enabled);
-    void invoke("set_crossref", { crossref: enabled }).catch(() => {});
+    void invoke("set_settings", {
+      crossref: enabled,
+      show_dialog: showDialog,
+    }).catch(() => {});
+  };
+
+  const setShowDialogEnabled = (enabled: boolean) => {
+    setShowDialog(enabled);
+    void invoke("set_settings", {
+      crossref,
+      show_dialog: enabled,
+    }).catch(() => {});
   };
 
   const addPaths = useCallback(async (paths: string[]) => {
@@ -308,6 +322,14 @@ export default function App() {
             onChange={(e) => setCrossrefEnabled(e.target.checked)}
           />
           CrossRef 在线校验
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={showDialog}
+            onChange={(e) => setShowDialogEnabled(e.target.checked)}
+          />
+          拖拽完成后弹窗
         </label>
         <div className="spacer" />
         <button

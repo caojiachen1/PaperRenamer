@@ -21,7 +21,7 @@ pub fn run() {
             commands::make_copy,
             commands::scan_folder,
             commands::get_settings,
-            commands::set_crossref,
+            commands::set_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

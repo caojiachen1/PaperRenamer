@@ -51,11 +51,13 @@ pub async fn get_settings() -> Result<settings::Settings, String> {
         .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
-#[tauri::command]
-pub async fn set_crossref(crossref: bool) -> Result<(), String> {
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_settings(crossref: bool, show_dialog: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut current = settings::load();
-        current.crossref = crossref;
+        let current = settings::Settings {
+            crossref,
+            show_dialog,
+        };
         settings::save(&current)
     })
     .await
