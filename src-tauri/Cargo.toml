@@ -1,0 +1,35 @@
+[package]
+name = "paper-renamer"
+version = "0.1.0"
+edition = "2021"
+default-run = "paper-renamer"
+
+[lib]
+name = "paper_renamer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+lopdf = "0.34"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+regex = "1"
+walkdir = "2.5"
+sha2 = "0.10"
+hex = "0.4"
+anyhow = "1"
+percent-encoding = "2"
+pdfium-render = "0.9"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
