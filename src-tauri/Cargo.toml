@@ -10,6 +10,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+flate2 = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -26,6 +27,7 @@ hex = "0.4"
 anyhow = "1"
 percent-encoding = "2"
 pdfium-render = "0.9"
+flate2 = "1"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]

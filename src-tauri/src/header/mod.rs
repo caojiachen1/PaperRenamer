@@ -26,12 +26,14 @@ pub struct TitleResult {
 
 impl HeaderEngine {
     /// Build the engine from assets compiled into the binary; only the pdfium
-    /// DLL path is external (it is materialized from `assets::PDFIUM_DLL`).
+    /// DLL path is external (it is materialized from the embedded copy).
     pub fn from_embedded(pdfium_dll: &Path) -> Result<Self, String> {
         let pdfium = extract::bind_pdfium(pdfium_dll)?;
-        let crf = CrfModel::from_bytes(assets::HEADER_MODEL)?;
+        let model = assets::inflate(assets::HEADER_MODEL_DEFLATE)?;
+        let english = assets::inflate(assets::LEX_ENGLISH_WF_DEFLATE)?;
+        let crf = CrfModel::from_bytes(&model)?;
         let lex = Lexicons::from_bytes(
-            assets::LEX_ENGLISH_WF,
+            &english,
             assets::LEX_NAMES_FEMALE,
             assets::LEX_NAMES_MALE,
             assets::LEX_FIRSTNAME_5K,

@@ -31,23 +31,22 @@ fn runtime_dir() -> PathBuf {
     std::env::temp_dir().join("PaperRenamer").join("runtime")
 }
 
-/// Extract the embedded pdfium DLL, reusing the previous copy when identical.
+/// Extract the embedded pdfium DLL, reusing the previous copy when intact.
 fn materialize_pdfium() -> Result<PathBuf, String> {
     let dir = runtime_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("创建运行时目录失败: {e}"))?;
     let path = dir.join("pdfium.dll");
-    let expected = assets::PDFIUM_DLL;
 
-    let up_to_date = match fs::read(&path) {
-        Ok(existing) => existing == expected,
-        Err(_) => false,
-    };
-    if up_to_date {
+    let intact = fs::metadata(&path)
+        .map(|m| m.len() as usize == assets::PDFIUM_DLL_LEN)
+        .unwrap_or(false);
+    if intact {
         return Ok(path);
     }
 
+    let bytes = assets::inflate(assets::PDFIUM_DLL_DEFLATE)?;
     let tmp = dir.join(format!("pdfium-{}.tmp", std::process::id()));
-    fs::write(&tmp, expected).map_err(|e| format!("写入 pdfium.dll 失败: {e}"))?;
+    fs::write(&tmp, &bytes).map_err(|e| format!("写入 pdfium.dll 失败: {e}"))?;
     match fs::rename(&tmp, &path) {
         Ok(()) => Ok(path),
         Err(_) if path.is_file() => {
@@ -62,6 +61,13 @@ fn materialize_pdfium() -> Result<PathBuf, String> {
 }
 
 fn init_inner() -> Result<HeaderEngine, String> {
-    let dll = materialize_pdfium()?;
-    HeaderEngine::from_embedded(&dll)
+    match HeaderEngine::from_embedded(&materialize_pdfium()?) {
+        Ok(engine) => Ok(engine),
+        Err(first) => {
+            // A truncated/corrupt cache can pass the size check; re-extract once.
+            let _ = fs::remove_file(runtime_dir().join("pdfium.dll"));
+            HeaderEngine::from_embedded(&materialize_pdfium()?)
+                .map_err(|e| format!("{first}; 重新释放 pdfium 后仍失败: {e}"))
+        }
+    }
 }
