@@ -41,12 +41,42 @@ fn main() {
     {
         let icon = manifest.join("icons/icon.ico");
         if icon.is_file() {
-            let rc_path = out.join("app.rc");
+            let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+            let mut parts = version.split('.').map(|p| p.parse::<u16>().unwrap_or(0));
+            let major = parts.next().unwrap_or(0);
+            let minor = parts.next().unwrap_or(0);
+            let patch = parts.next().unwrap_or(0);
+
             let icon_str = icon.display().to_string().replace('\\', "\\\\");
-            fs::write(&rc_path, format!("1 ICON \"{icon_str}\"\n")).expect("write app.rc");
+            let rc = format!(
+                "1 ICON \"{icon_str}\"\n\
+                 1 VERSIONINFO\n\
+                 FILEVERSION {major},{minor},{patch},0\n\
+                 PRODUCTVERSION {major},{minor},{patch},0\n\
+                 FILEOS 0x40004\n\
+                 FILETYPE 0x1\n\
+                 BEGIN\n\
+                   BLOCK \"StringFileInfo\"\n\
+                   BEGIN\n\
+                     BLOCK \"040904B0\"\n\
+                     BEGIN\n\
+                       VALUE \"FileDescription\", \"PaperRenamer\"\n\
+                       VALUE \"FileVersion\", \"{version}\"\n\
+                       VALUE \"ProductName\", \"PaperRenamer\"\n\
+                       VALUE \"ProductVersion\", \"{version}\"\n\
+                     END\n\
+                   END\n\
+                   BLOCK \"VarFileInfo\"\n\
+                   BEGIN\n\
+                     VALUE \"Translation\", 0x409, 1200\n\
+                   END\n\
+                 END\n"
+            );
+            let rc_path = out.join("app.rc");
+            fs::write(&rc_path, rc).expect("write app.rc");
             embed_resource::compile(&rc_path, embed_resource::NONE)
                 .manifest_optional()
-                .expect("embed application icon");
+                .expect("embed icon and version resource");
             println!("cargo:rerun-if-changed={}", icon.display());
         }
     }
