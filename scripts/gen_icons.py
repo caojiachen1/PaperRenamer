@@ -2,7 +2,7 @@
 from PIL import Image, ImageDraw
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "src-tauri" / "icons"
+OUT = Path(__file__).resolve().parent.parent / "icons"
 OUT.mkdir(parents=True, exist_ok=True)
 
 

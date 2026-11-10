@@ -127,13 +127,13 @@ pub fn run(args: &[String]) {
     }
 
     if settings.show_dialog {
-        crate::ui::show_summary(crate::ui::Summary {
+        crate::dialog::show_summary(crate::dialog::Summary {
             total: pdfs.len(),
             created,
             existing,
             already_named,
             failed,
-            log_path,
+            log_path: log_path.map(|path| path.display().to_string()),
             problems,
         });
     }

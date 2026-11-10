@@ -18,21 +18,36 @@ fn pack(src: PathBuf, out: &PathBuf, name: &str, env_len: &str) {
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let assets = manifest.join("assets");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    pack(manifest.join("assets/pdfium.dll"), &out, "pdfium.dll", "PDFIUM_DLL_LEN");
+    pack(assets.join("pdfium.dll"), &out, "pdfium.dll", "PDFIUM_DLL_LEN");
     pack(
-        manifest.join("assets/header-model.wapiti"),
+        assets.join("header-model.wapiti"),
         &out,
         "header-model.wapiti",
         "HEADER_MODEL_LEN",
     );
     pack(
-        manifest.join("assets/lexicon/wordforms/english.wf"),
+        assets.join("lexicon/wordforms/english.wf"),
         &out,
         "english.wf",
         "ENGLISH_WF_LEN",
     );
 
-    tauri_build::build()
+    println!("cargo:rerun-if-changed=build.rs");
+
+    #[cfg(windows)]
+    {
+        let icon = manifest.join("icons/icon.ico");
+        if icon.is_file() {
+            let rc_path = out.join("app.rc");
+            let icon_str = icon.display().to_string().replace('\\', "\\\\");
+            fs::write(&rc_path, format!("1 ICON \"{icon_str}\"\n")).expect("write app.rc");
+            embed_resource::compile(&rc_path, embed_resource::NONE)
+                .manifest_optional()
+                .expect("embed application icon");
+            println!("cargo:rerun-if-changed={}", icon.display());
+        }
+    }
 }

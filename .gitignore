@@ -1,5 +1,5 @@
-node_modules/
-dist/
-dist-portable/
-src-tauri/target/
+/target
+/dist-portable
+/node_modules
+/.cargo/config.toml
 *.log
