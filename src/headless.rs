@@ -1,7 +1,7 @@
 //! Drag-onto-exe mode: batch parse + renamed copies, log file, summary dialog.
 //!
-//! Local extraction (pdfium is not thread-safe) runs sequentially, then the
-//! network cross-check and file copies run on a small worker pool.
+//! Local extraction (pdfium is not thread-safe) runs sequentially, then file
+//! copies run on a small worker pool.
 
 use std::fs;
 use std::path::PathBuf;
@@ -30,13 +30,6 @@ pub fn run(args: &[String]) {
     let started = Instant::now();
     let timing = std::env::var_os("PAPERRENAMER_TIMING").is_some();
     let settings = crate::settings::load();
-    let online = if std::env::var_os("PAPERRENAMER_OFFLINE").is_some() {
-        false
-    } else if std::env::var_os("PAPERRENAMER_ONLINE").is_some() {
-        true
-    } else {
-        settings.crossref
-    };
     let (pdfs, problems) = rename::collect_pdfs(args);
 
     let mut lines: Vec<String> = problems.iter().map(|p| format!("[SKIP] {p}")).collect();
@@ -91,7 +84,7 @@ pub fn run(args: &[String]) {
                 }
                 let item = &items[i];
                 let local = item.local.as_ref().expect("local parse succeeded");
-                let _ = results[i].set(process_item(item, local, online));
+                let _ = results[i].set(process_item(item, local));
             });
         }
     });
@@ -119,7 +112,7 @@ pub fn run(args: &[String]) {
     }
     if timing {
         eprintln!(
-            "[TIMING] local {:.0}ms, verify+copy {:.0}ms, total {:.0}ms, workers {workers}",
+            "[TIMING] local {:.0}ms, copy {:.0}ms, total {:.0}ms, workers {workers}",
             (local_done - started).as_secs_f64() * 1000.0,
             (processed_done - local_done).as_secs_f64() * 1000.0,
             started.elapsed().as_secs_f64() * 1000.0
@@ -139,21 +132,13 @@ pub fn run(args: &[String]) {
     }
 }
 
-fn process_item(item: &Item, local: &LocalParse, online: bool) -> Processed {
+fn process_item(item: &Item, local: &LocalParse) -> Processed {
     let mut lines = Vec::new();
-    let mut title = local.title.clone();
-    let mut source = local.source.clone();
+    let title = local.title.clone();
+    let source = local.source.clone();
 
     for w in &local.warnings {
         lines.push(format!("[WARN] {}: {w}", item.display));
-    }
-    if online && !local.cjk {
-        let verified = pipeline::verify(local);
-        title = verified.title;
-        source = verified.source;
-        if let Some(w) = verified.warning {
-            lines.push(format!("[WARN] {}: {w}", item.display));
-        }
     }
 
     let mut processed = Processed {

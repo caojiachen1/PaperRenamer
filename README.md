@@ -1,10 +1,10 @@
 # PaperRenamer
 
-Rename paper PDFs from their titles, fully offline by default.
+Rename paper PDFs from their titles, fully offline.
 
 - Double-click the exe for the GPUI GUI, or drag PDFs/folders onto it to rename copies in place.
-- Titles come from embedded XMP plus a Rust port of GROBID's header CRF; the optional CrossRef
-  cross-check is off by default and remembered once enabled in the GUI.
+- Titles come from embedded XMP plus a Rust port of GROBID's header CRF. Fully offline: no
+  network access, no API keys.
 - Pure-Rust GPUI desktop app, single self-contained exe: no WebView, no Java, no OCR.
 
 ## Build

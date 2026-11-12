@@ -1,36 +1,22 @@
-//! Title extraction pipeline, split into two phases so the slow online check
-//! can run concurrently with other files:
-//!   phase 1 (local): embedded XMP/Info → Rust header CRF → title choice
-//!   phase 2 (online): CrossRef cross-validation against the local result
+//! Title extraction pipeline: embedded XMP/Info → Rust header CRF → title choice.
+//! Everything here is local; no network access.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
 use regex::Regex;
-use serde::Serialize;
 
-use crate::{crossref, engine, pdfmeta, rename};
+use crate::{engine, pdfmeta, rename};
 
-/// Everything that can be decided without network access.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct LocalParse {
     pub title: String,
     pub doi: Option<String>,
     pub source: String,
     pub suggested_name: String,
     pub warnings: Vec<String>,
-    pub cjk: bool,
-    pub ext: String,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct VerifyOutcome {
-    pub title: String,
-    pub doi: Option<String>,
-    pub source: String,
-    pub suggested_name: String,
-    pub warning: Option<String>,
 }
 
 pub fn parse_local(path: &Path) -> Result<LocalParse, String> {
@@ -46,8 +32,15 @@ pub fn parse_local(path: &Path) -> Result<LocalParse, String> {
         }
     };
 
-    let grobid_title = header.as_ref().and_then(|h| h.title.clone());
-    let xmp_title = embedded.title.clone();
+    let grobid_title = header
+        .as_ref()
+        .and_then(|h| h.title.clone())
+        .map(|t| strip_header_label(&t));
+    let xmp_title = embedded
+        .title
+        .clone()
+        .filter(|t| !is_placeholder_title(t))
+        .map(|t| strip_header_label(&t));
     let cjk = has_cjk(grobid_title.as_deref()) || has_cjk(xmp_title.as_deref());
 
     let (title, source) = match (grobid_title, xmp_title) {
@@ -59,7 +52,7 @@ pub fn parse_local(path: &Path) -> Result<LocalParse, String> {
                 } else {
                     (g, "HEADER".to_string())
                 }
-            } else if crossref::title_similarity(&g, &x) > 0.7 {
+            } else if title_similarity(&g, &x) > 0.7 {
                 (g, "HEADER+XMP".to_string())
             } else {
                 warnings.push("页眉识别与 XMP 标题不一致，采用页眉识别结果".to_string());
@@ -78,10 +71,6 @@ pub fn parse_local(path: &Path) -> Result<LocalParse, String> {
         .and_then(|h| find_doi(&h.first_page_text))
         .or(embedded.doi);
 
-    if cjk {
-        warnings.push("检测到中文论文，跳过在线校验（GROBID/CrossRef 对中文支持有限）".to_string());
-    }
-
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_string())
@@ -94,57 +83,7 @@ pub fn parse_local(path: &Path) -> Result<LocalParse, String> {
         source,
         suggested_name,
         warnings,
-        cjk,
-        ext,
     })
-}
-
-/// CrossRef verification of a local result. Returns the local values unchanged
-/// when the online lookup is inconclusive.
-pub fn verify(local: &LocalParse) -> VerifyOutcome {
-    let mut out = VerifyOutcome {
-        title: local.title.clone(),
-        doi: local.doi.clone(),
-        source: local.source.clone(),
-        suggested_name: local.suggested_name.clone(),
-        warning: None,
-    };
-    if local.cjk {
-        return out;
-    }
-
-    let mut changed = false;
-    if let Some(d) = &local.doi {
-        if let Some(hit) = crossref::resolve_doi(d) {
-            // Guard against a mis-extracted DOI pointing at a different paper.
-            if crossref::word_overlap(&out.title.to_lowercase(), &hit.title.to_lowercase()) >= 0.25
-            {
-                out.title = hit.title;
-                out.source = "CrossRef".to_string();
-                changed = true;
-            } else {
-                out.warning = Some("CrossRef 结果与本地标题差异过大，保留本地标题".to_string());
-            }
-        }
-    } else if out.title.chars().count() > 10 {
-        if let Some(hit) = crossref::search_by_title(&out.title) {
-            out.title = hit.title;
-            out.doi = hit.doi.or(out.doi);
-            out.source = "CrossRef".to_string();
-            changed = true;
-        }
-    }
-
-    if changed {
-        match suggested_name(&out.title, &local.ext) {
-            Ok(name) => out.suggested_name = name,
-            Err(_) => {
-                out.title = local.title.clone();
-                out.source = local.source.clone();
-            }
-        }
-    }
-    out
 }
 
 fn suggested_name(title: &str, ext: &str) -> Result<String, String> {
@@ -153,6 +92,31 @@ fn suggested_name(title: &str, ext: &str) -> Result<String, String> {
         return Err("标题清洗后为空，无法生成文件名".to_string());
     }
     Ok(format!("{stem}.{ext}"))
+}
+
+/// Publisher PDFs often print an article-state label above the title.
+fn strip_header_label(title: &str) -> String {
+    let mut text = title.trim();
+    for label in ["Journal Pre-proof", "ARTICLE IN PRESS", "Accepted Manuscript"] {
+        if let Some(prefix) = text.get(..label.len()) {
+            if prefix.eq_ignore_ascii_case(label) {
+                text = &text[label.len()..];
+                text = text.trim_start_matches(|c: char| {
+                    c.is_whitespace() || matches!(c, ':' | '-' | '–' | '—')
+                });
+                break;
+            }
+        }
+    }
+    collapse_ws(text)
+}
+
+fn is_placeholder_title(title: &str) -> bool {
+    let text = title.trim();
+    text.is_empty()
+        || ["标题", "无标题", "title", "untitled", "document"]
+            .iter()
+            .any(|p| text.eq_ignore_ascii_case(p))
 }
 
 fn find_doi(text: &str) -> Option<String> {
@@ -192,4 +156,47 @@ fn has_cjk(s: Option<&str>) -> bool {
         })
     })
     .unwrap_or(false)
+}
+
+fn collapse_ws(s: &str) -> String {
+    static WS: OnceLock<Regex> = OnceLock::new();
+    let ws = WS.get_or_init(|| Regex::new(r"\s+").unwrap());
+    ws.replace_all(s.trim(), " ").trim().to_string()
+}
+
+/// Word-overlap similarity, ported from xDoc (words longer than 2 chars).
+fn word_overlap(a: &str, b: &str) -> f64 {
+    let words = |s: &str| -> HashSet<String> {
+        s.split_whitespace()
+            .filter(|w| w.chars().count() > 2)
+            .map(|w| w.to_string())
+            .collect()
+    };
+    let wa = words(a);
+    let wb = words(b);
+    if wa.is_empty() || wb.is_empty() {
+        return 0.0;
+    }
+    let common = wa.intersection(&wb).count();
+    common as f64 / wa.len().max(wb.len()) as f64
+}
+
+/// Normalized similarity for cross-source title agreement (xDoc titleSimilarity).
+fn title_similarity(a: &str, b: &str) -> f64 {
+    static NON_WORD: OnceLock<Regex> = OnceLock::new();
+    let norm = |s: &str| -> String {
+        let lower = s.to_lowercase();
+        let re = NON_WORD.get_or_init(|| Regex::new(r"[^a-z0-9\s]").unwrap());
+        let stripped = re.replace_all(&lower, "");
+        collapse_ws(&stripped)
+    };
+    let na = norm(a);
+    let nb = norm(b);
+    if na.is_empty() || nb.is_empty() {
+        return 0.0;
+    }
+    if na == nb {
+        return 1.0;
+    }
+    word_overlap(&na, &nb)
 }

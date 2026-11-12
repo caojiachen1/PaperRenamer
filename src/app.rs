@@ -57,10 +57,6 @@ struct Row {
     doi: Option<String>,
     suggested: SharedString,
     warnings: Vec<String>,
-    cjk: bool,
-    ext: String,
-    verified: bool,
-    verifying: bool,
     error: Option<String>,
     new_path: Option<PathBuf>,
     copy_label: Option<&'static str>,
@@ -79,11 +75,6 @@ struct LocalJob {
     path: PathBuf,
 }
 
-struct VerifyJob {
-    id: u64,
-    local: pipeline::LocalParse,
-}
-
 struct CopyJob {
     id: u64,
     path: PathBuf,
@@ -96,10 +87,6 @@ enum UiEvent {
     LocalParsed {
         id: u64,
         result: Result<pipeline::LocalParse, String>,
-    },
-    Verified {
-        id: u64,
-        outcome: pipeline::VerifyOutcome,
     },
     Copied {
         id: u64,
@@ -114,7 +101,6 @@ pub struct AppView {
     known: HashSet<PathBuf>,
     next_id: u64,
     engine: EngineState,
-    crossref: bool,
     show_dialog: bool,
     drag_over: bool,
     dropped_paths: Vec<PathBuf>,
@@ -124,7 +110,6 @@ pub struct AppView {
     rx: Receiver<UiEvent>,
     ui_tx: Sender<UiEvent>,
     local_tx: Sender<LocalJob>,
-    verify_tx: Sender<VerifyJob>,
     copy_tx: Sender<CopyJob>,
 }
 
@@ -169,7 +154,6 @@ impl AppView {
         let (tx, rx) = mpsc::channel::<UiEvent>();
         let ui_tx = tx.clone();
         let (local_tx, local_rx) = mpsc::channel::<LocalJob>();
-        let (verify_tx, verify_rx) = mpsc::channel::<VerifyJob>();
         let (copy_tx, copy_rx) = mpsc::channel::<CopyJob>();
 
         {
@@ -197,24 +181,6 @@ impl AppView {
             });
         }
 
-        let verify_rx = Arc::new(Mutex::new(verify_rx));
-        for _ in 0..4 {
-            let rx = verify_rx.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || loop {
-                let job = {
-                    let guard = rx.lock().unwrap();
-                    guard.recv()
-                };
-                let Ok(job) = job else { break };
-                let outcome = pipeline::verify(&job.local);
-                let _ = tx.send(UiEvent::Verified {
-                    id: job.id,
-                    outcome,
-                });
-            });
-        }
-
         let copy_rx = Arc::new(Mutex::new(copy_rx));
         for _ in 0..4 {
             let rx = copy_rx.clone();
@@ -239,7 +205,6 @@ impl AppView {
             known: HashSet::new(),
             next_id: 1,
             engine: EngineState::Loading,
-            crossref: saved.crossref,
             show_dialog: saved.show_dialog,
             drag_over: false,
             dropped_paths: Vec::new(),
@@ -249,7 +214,6 @@ impl AppView {
             rx,
             ui_tx,
             local_tx,
-            verify_tx,
             copy_tx,
         };
         this.start_watcher(cx);
@@ -308,17 +272,12 @@ impl AppView {
                             row.doi = local.doi.clone();
                             row.suggested = SharedString::from(local.suggested_name.clone());
                             row.warnings = local.warnings.clone();
-                            row.cjk = local.cjk;
-                            row.ext = local.ext.clone();
                             row.error = None;
                             let field = row.field.clone();
                             field.update(cx, |field, cx| {
                                 field.set_value_start(local.title.clone());
                                 cx.notify();
                             });
-                            if self.crossref && !local.cjk {
-                                self.enqueue_verify(id, local);
-                            }
                         }
                         Err(e) => {
                             row.status = RowStatus::Failed;
@@ -327,28 +286,6 @@ impl AppView {
                     }
                 }
                 self.pump_local();
-            }
-            UiEvent::Verified { id, outcome } => {
-                if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
-                    row.verifying = false;
-                    row.verified = true;
-                    let current = row.field.read(cx).text();
-                    let user_edited = current != row.title;
-                    if !user_edited {
-                        row.source = Some(outcome.source.clone());
-                        row.doi = outcome.doi.clone();
-                        row.suggested = SharedString::from(outcome.suggested_name.clone());
-                        row.title = outcome.title.clone();
-                        if let Some(warning) = outcome.warning {
-                            row.warnings.push(warning);
-                        }
-                        let field = row.field.clone();
-                        field.update(cx, |field, cx| {
-                            field.set_value_start(outcome.title.clone());
-                            cx.notify();
-                        });
-                    }
-                }
             }
             UiEvent::Copied { id, result } => {
                 if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
@@ -394,16 +331,6 @@ impl AppView {
                 path: row.path.clone(),
             });
         }
-    }
-
-    fn enqueue_verify(&mut self, id: u64, local: pipeline::LocalParse) {
-        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
-            if row.verifying || row.verified {
-                return;
-            }
-            row.verifying = true;
-        }
-        let _ = self.verify_tx.send(VerifyJob { id, local });
     }
 
     fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -455,10 +382,6 @@ impl AppView {
                 doi: None,
                 suggested: SharedString::default(),
                 warnings: Vec::new(),
-                cjk: false,
-                ext: "pdf".to_string(),
-                verified: false,
-                verifying: false,
                 error: None,
                 new_path: None,
                 copy_label: None,
@@ -476,38 +399,6 @@ impl AppView {
         }
     }
 
-    fn toggle_crossref(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.crossref = enabled;
-        self.save_settings();
-        if enabled {
-            let jobs: Vec<(u64, pipeline::LocalParse)> = self
-                .rows
-                .iter()
-                .filter(|row| {
-                    row.status == RowStatus::Ready && !row.verified && !row.cjk && !row.verifying
-                })
-                .filter_map(|row| {
-                    Some((
-                        row.id,
-                        pipeline::LocalParse {
-                            title: row.title.clone(),
-                            doi: row.doi.clone(),
-                            source: row.source.clone().unwrap_or_default(),
-                            suggested_name: row.suggested.to_string(),
-                            warnings: Vec::new(),
-                            cjk: row.cjk,
-                            ext: row.ext.clone(),
-                        },
-                    ))
-                })
-                .collect();
-            for (id, local) in jobs {
-                self.enqueue_verify(id, local);
-            }
-        }
-        cx.notify();
-    }
-
     fn toggle_show_dialog(&mut self, enabled: bool) {
         self.show_dialog = enabled;
         self.save_settings();
@@ -515,7 +406,6 @@ impl AppView {
 
     fn save_settings(&self) {
         let _ = settings::save(&Settings {
-            crossref: self.crossref,
             show_dialog: self.show_dialog,
         });
     }
@@ -653,15 +543,6 @@ impl AppView {
             .child(files_btn)
             .child(dir_btn)
             .child(clear_btn)
-            .child(checkbox(
-                &theme,
-                "crossref",
-                "CrossRef 在线校验",
-                self.crossref,
-            ).on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                let next = !this.crossref;
-                this.toggle_crossref(next, cx);
-            })))
             .child(checkbox(
                 &theme,
                 "show-dialog",
@@ -813,7 +694,7 @@ impl AppView {
                     .text_color(theme.fg_secondary)
                     .text_center()
                     .line_height(px(19.0))
-                    .child("自动解析标题（版面识别 + XMP + CrossRef 交叉验证），确认后在原目录生成重命名副本"),
+                    .child("自动解析标题（版面识别 + XMP），确认后在原目录生成重命名副本"),
             )
             .child(
                 div()
@@ -996,14 +877,6 @@ impl AppView {
             .child(match &row.source {
                 Some(source) => badge_outline(theme, source),
                 None => div(),
-            })
-            .child(if row.verifying {
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.fg_dim)
-                    .child("核对中…")
-            } else {
-                div()
             });
 
         let status = div()

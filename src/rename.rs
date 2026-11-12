@@ -37,10 +37,13 @@ pub fn sanitize_title(title: &str) -> String {
             c => c,
         })
         .collect();
-    sanitized = sanitized.trim().trim_end_matches(['.', ' ']).to_string();
+    sanitized = sanitized
+        .trim()
+        .trim_matches(['_', '.', ' '])
+        .to_string();
     // Keep component length sane on Windows (255-char limit per component).
     sanitized = sanitized.chars().take(180).collect();
-    sanitized = sanitized.trim_end_matches(['.', ' ']).to_string();
+    sanitized = sanitized.trim_end_matches(['_', '.', ' ']).to_string();
 
     let upper = sanitized.to_uppercase();
     let reserved = ["CON", "PRN", "AUX", "NUL"];

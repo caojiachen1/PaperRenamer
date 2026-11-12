@@ -9,16 +9,12 @@ use crate::engine;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
-    pub crossref: bool,
     pub show_dialog: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            crossref: false,
-            show_dialog: true,
-        }
+        Self { show_dialog: true }
     }
 }
 
